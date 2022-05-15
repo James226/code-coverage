@@ -1,0 +1,13 @@
+{
+  "profiles": {
+    "CodeCoverage.Example": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "CORECLR_ENABLE_PROFILING": "1",
+        "CORECLR_PROFILER": "{cf0d821e-299b-5307-a3d8-b283c03916dd}",
+        "CORECLR_PROFILER_PATH": "C:\\dev\\code-coverage\\x64\\Debug\\CodeCoverage.dll"
+      },
+      "nativeDebugging": true
+    }
+  }
+}

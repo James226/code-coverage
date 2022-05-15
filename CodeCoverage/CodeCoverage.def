@@ -1,0 +1,5 @@
+LIBRARY "CodeCoverage.Dll"
+
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE
