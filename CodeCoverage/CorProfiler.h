@@ -7,13 +7,28 @@
 #include "cor.h"
 #include "corprof.h"
 
-
 struct FunctionDetails
 {
     std::string name;
     ULONG invocations;
 
     FunctionDetails(std::string name): name(name), invocations(0) {}
+};
+
+struct ClassDetails
+{
+    std::string name;
+    std::map<mdToken, FunctionDetails*> functions;
+
+    ClassDetails(std::string name): name(name) {}
+};
+
+struct ModuleDetails
+{
+    std::string name;
+    std::map<ModuleID, ClassDetails*> types;
+    
+    ModuleDetails(std::string name): name(name) {}
 };
 
 class CorProfiler : public ICorProfilerCallback8
@@ -28,6 +43,7 @@ private:
     static CorProfiler* _profiler;
 
     std::map<mdToken, FunctionDetails*> functions;
+    std::map<mdToken, ModuleDetails*> modules;
 
 public:
     CorProfiler();

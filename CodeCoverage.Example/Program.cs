@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Threading.Tasks;
 
 namespace CodeCoverage.Example
 {
@@ -6,7 +7,9 @@ namespace CodeCoverage.Example
     {
         static void Main(string[] args)
         {
+            var foo = new {Test = "1"};
             Console.WriteLine(Hello());
+            Console.WriteLine(OhDear().Result);
         }
 
         static string Hello()
@@ -18,6 +21,11 @@ namespace CodeCoverage.Example
         {
             return "Unused";
         }
+
+        static async Task<string> OhDear()
+        {
+            return await Task.FromResult("The answer");
+        } 
     }
 
     public class UnusedClass

@@ -50,7 +50,7 @@ ENTRYPOINT ["dotnet", "CodeCoverage.Example.dll"]
 
 FROM app AS coverage
 
-COPY --from=code-coverage:0.1 /app/CorProfiler.so .
+COPY --from=code-coverage:0.2 /app/CorProfiler.so .
 
 ENV CORECLR_PROFILER={cf0d821e-299b-5307-a3d8-b283c03916dd}
 ENV CORECLR_ENABLE_PROFILING=1

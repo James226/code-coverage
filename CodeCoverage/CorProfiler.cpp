@@ -1,4 +1,6 @@
 #include <string>
+#include <mutex>
+#include <fstream>
 #include "CorProfiler.h"
 #include "corhlpr.h"
 #include "CComPtr.h"
@@ -25,13 +27,19 @@ void STDMETHODCALLTYPE CorProfiler::Enter(FunctionID functionId)
     if (FAILED(functionResult)) {
         return;
     }
+    
+    corProfilerInfo->GetClassIDInfo(classId, &module, &type);
+    
+    auto mod = this->modules.find(module);
+    if(mod == this->modules.end()) return;
+    
+    auto t = mod->second->types.find(type);
+    if(t == mod->second->types.end()) return;
+    
+    auto func = t->second->functions.find(token);
+    if (func == t->second->functions.end()) return;
 
-    auto func = this->functions.find(token);
-    if (func == this->functions.end())
-    {
-        return;
-    }
-    printf("Enter %s\r\n", func->second->name.c_str());
+    //printf("Enter %s\r\n", func->second->name.c_str());
     func->second->invocations++;
 }
 
@@ -68,8 +76,11 @@ CorProfiler::~CorProfiler()
 }
 
 CorProfiler* CorProfiler::_profiler = nullptr;
+std::mutex singleton_mutex;
+
 CorProfiler* CorProfiler::Get()
 {
+    std::lock_guard<std::mutex> guard(singleton_mutex);
     if (_profiler == nullptr)
     {
         _profiler = new CorProfiler();
@@ -103,10 +114,20 @@ HRESULT STDMETHODCALLTYPE CorProfiler::Initialize(IUnknown *pICorProfilerInfoUnk
 
 HRESULT STDMETHODCALLTYPE CorProfiler::Shutdown()
 {
-    for (const auto& [key, value] : this->functions) {
-        printf("Function %s called %i times\r\n", value->name.c_str(), value->invocations);
+    std::ofstream results;
+    results.open("coverage.csv");
+
+    for (const auto& [moduleId, module] : this->modules)
+    for (const auto& [classId, type] : module->types) 
+    for (const auto& [key, value] : type->functions) {
+        //if (value->invocations > 0) {
+            results << module->name.c_str() << "," << type->name.c_str() << "," << value->name.c_str() << "," << value->invocations << std::endl;
+            printf("(%s) %s.%s: %i\r\n", module->name.c_str(), type->name.c_str(), value->name.c_str(), value->invocations);
+        //}
         delete value;
     }
+    
+    results.close();
 
     if (this->corProfilerInfo != nullptr)
     {
@@ -162,6 +183,32 @@ HRESULT STDMETHODCALLTYPE CorProfiler::ModuleLoadStarted(ModuleID moduleId)
     return S_OK;
 }
 
+bool ContainsPath(const std::string dllFilename, const std::string dll)
+{
+    auto start = 0U;
+    auto end = dll.find(",");
+
+    do
+    {
+        auto allowedName = dll.substr(start, end - start);
+        if (dllFilename.compare(allowedName) == 0)
+        {
+            return true;
+        }
+        start = end + 1;
+        end = dll.find(",", start);
+    }
+    while (end != std::string::npos);
+    
+    auto allowedName = dll.substr(start, dll.length() - start);
+    if (dllFilename.compare(allowedName) == 0)
+    {
+        return true;
+    }
+    
+    return false;
+}
+
 HRESULT STDMETHODCALLTYPE CorProfiler::ModuleLoadFinished(ModuleID moduleId, HRESULT hrStatus)
 {
     HRESULT hr;
@@ -175,12 +222,22 @@ HRESULT STDMETHODCALLTYPE CorProfiler::ModuleLoadFinished(ModuleID moduleId, HRE
 
     hr = this->corProfilerInfo->GetModuleInfo2(moduleId, &baseAddress, 256, &size, name, &assemblyId, &flags);
 
-    if (UnicodeToAnsi(name).find("CodeCoverage.Example.dll") == std::string::npos)
-    {
+    const char* dll = std::getenv("CORECLR_PROFILER_DLL");
+    if (!dll)
+        dll = "CodeCoverage.Example.dll";
+    
+    
+    auto dllPath = UnicodeToAnsi(name);
+    auto dllFilename = dllPath.substr(dllPath.find_last_of("/\\") + 1);
+    
+    if (!ContainsPath(dllFilename, dll)) {
         return S_OK;
     }
+    
+    auto moduleDetails = new ModuleDetails(dllFilename);
+    this->modules[moduleId] = moduleDetails;
 
-    printf("Module loaded: %s\r\n", UnicodeToAnsi(name).c_str());
+    printf("Module loaded: %s (%llx)\r\n", UnicodeToAnsi(name).c_str(), (UINT64)moduleId);
 
     CComPtr<IMetaDataImport> metadataImport;
     hr = this->corProfilerInfo->GetModuleMetaData(moduleId, ofRead, IID_IMetaDataImport, reinterpret_cast<IUnknown**>(&metadataImport));
@@ -188,41 +245,54 @@ HRESULT STDMETHODCALLTYPE CorProfiler::ModuleLoadFinished(ModuleID moduleId, HRE
     HCORENUM position = nullptr;
     mdTypeDef types[50];
     ULONG numTypes;
-
-
-    hr = metadataImport->EnumTypeDefs(&position, types, 50, &numTypes);
-
-    for (ULONG i = 0; i < numTypes; ++i)
-    {
-        ULONG size;
-        WCHAR typeName[256];
-        DWORD flags;
-        mdToken baseType;
-        metadataImport->GetTypeDefProps(types[i], typeName, 256, &size, &flags, &baseType);
-
-        printf("Found Type %s\r\n", UnicodeToAnsi(typeName).c_str());
-
-        HCORENUM position = nullptr;
-        mdMethodDef methodDef[50];
-        ULONG tokens;
-
-        hr = metadataImport->EnumMethods(&position, types[i], methodDef, 50, &tokens);
-
-        for (ULONG i = 0; i < tokens; ++i)
+    HRESULT typeResult;
+    do {
+        typeResult = metadataImport->EnumTypeDefs(&position, types, 50, &numTypes);
+        
+        if (typeResult == S_FALSE) break;
+    
+        for (ULONG i = 0; i < numTypes; ++i)
         {
-            PCCOR_SIGNATURE sig;
-            ULONG blobSize, size, attributes;
-            WCHAR name[256];
+            ULONG size;
+            WCHAR typeName[256];
             DWORD flags;
-            ULONG codeRva;
-            mdTypeDef type;
-            metadataImport->GetMethodProps(methodDef[i], &type, name, 256, &size, &attributes, &sig, &blobSize, &codeRva, &flags);
+            mdToken baseType;
+            metadataImport->GetTypeDefProps(types[i], typeName, 256, &size, &flags, &baseType);
             
-            printf("Found Method %s::%s\r\n", UnicodeToAnsi(typeName).c_str(), UnicodeToAnsi(name).c_str());
-
-            this->functions[methodDef[i]] = new FunctionDetails(UnicodeToAnsi(typeName) + "::" + UnicodeToAnsi(name));
+            if (typeName[0] == '<') {
+                continue;
+            }
+            
+            auto ansiTypeName = UnicodeToAnsi(typeName);
+    
+            printf("Found Type %s (%i)\r\n", ansiTypeName.c_str(), types[i]);
+            
+            auto typeDetails = new ClassDetails(ansiTypeName);
+            moduleDetails->types[types[i]] = typeDetails;
+    
+            HCORENUM pos2 = nullptr;
+            mdMethodDef methodDef[50];
+            ULONG tokens;
+    
+            hr = metadataImport->EnumMethods(&pos2, types[i], methodDef, 50, &tokens);
+    
+            for (ULONG j = 0; j < tokens; ++j)
+            {
+                PCCOR_SIGNATURE sig;
+                ULONG blobSize, size, attributes;
+                WCHAR name[256];
+                DWORD flags;
+                ULONG codeRva;
+                mdTypeDef type;
+                metadataImport->GetMethodProps(methodDef[j], &type, name, 256, &size, &attributes, &sig, &blobSize, &codeRva, &flags);
+                
+                auto functionDetails = new FunctionDetails(UnicodeToAnsi(name));
+                typeDetails->functions[methodDef[j]] = functionDetails;
+                //printf("Found Method %i %s::%s\r\n", methodDef[j], UnicodeToAnsi(typeName).c_str(), UnicodeToAnsi(name).c_str());
+                this->functions[methodDef[j]] = new FunctionDetails(UnicodeToAnsi(typeName) + "::" + UnicodeToAnsi(name));
+            }
         }
-    }
+    } while (typeResult == S_OK);
 
     return S_OK;
 }
@@ -313,22 +383,38 @@ HRESULT STDMETHODCALLTYPE CorProfiler::JITCompilationStarted(FunctionID function
     ModuleID moduleId;
 
     IfFailRet(this->corProfilerInfo->GetFunctionInfo(functionId, &classId, &moduleId, &token));
-
-    auto func = this->functions.find(token);
-    if (func == this->functions.end())
-    {
+    
+    if (classId == 0) {
+        printf("Skipping generic JIT\n");
         return S_OK;
     }
-
+    mdTypeDef typeDef;
+    ClassID pParentClassId;
+    ULONG32 cNumTypeArgs;
+    ULONG32 pcNumTypeArgs;
+    ClassID typeArgs[50];  
+    IfFailRet(this->corProfilerInfo->GetClassIDInfo2(classId, &moduleId, &typeDef, &pParentClassId, 50, &pcNumTypeArgs, typeArgs));
+    
     CComPtr<IMetaDataImport> metadataImport;
     IfFailRet(this->corProfilerInfo->GetModuleMetaData(moduleId, ofRead | ofWrite, IID_IMetaDataImport, reinterpret_cast<IUnknown **>(&metadataImport)));
 
     CComPtr<IMetaDataEmit> metadataEmit;
     IfFailRet(metadataImport->QueryInterface(IID_IMetaDataEmit, reinterpret_cast<void **>(&metadataEmit)));
-
+    
+    auto mod = this->modules.find(moduleId);
+    if(mod == this->modules.end()) return S_OK;
+    
+    auto type = mod->second->types.find(typeDef);
+    if(type == mod->second->types.end()) return S_OK;
+    
+    auto func = type->second->functions.find(token);
+    if (func == type->second->functions.end()) return S_OK;
+    
+    //printf("Function JIT Compilation Started. %s (%llx, %i, %i)\r\n", GetMethodName(functionId).c_str(), (UINT64)moduleId, typeDef, token);
+    
     mdSignature enterLeaveMethodSignatureToken;
     metadataEmit->GetTokenFromSig(enterLeaveMethodSignature, sizeof(enterLeaveMethodSignature), &enterLeaveMethodSignatureToken);
-    printf("Function JIT Compilation Started. %s (%llx)\r\n", GetMethodName(functionId).c_str(), (UINT64)functionId);
+
     return RewriteIL(this->corProfilerInfo, nullptr, moduleId, token, functionId, reinterpret_cast<ULONGLONG>(EnterMethodAddress), reinterpret_cast<ULONGLONG>(LeaveMethodAddress), enterLeaveMethodSignatureToken);
 }
 
